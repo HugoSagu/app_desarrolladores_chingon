@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""HBU-NAVIGATOR | Terminal Institucional de Prefactibilidad para Desarrolladores (Con Costos Paramétricos CMIC)"""
+"""HBU-NAVIGATOR | Terminal Institucional de Prefactibilidad para Desarrolladores (Con Predio Catastral en Vivo)"""
 
 import streamlit as st
 import pandas as pd
@@ -8,12 +8,19 @@ from scipy.spatial import KDTree
 from streamlit_js_eval import get_geolocation
 import pydeck as pdk
 import os
+import requests
 import datetime
+
+try:
+    import geopandas as gpd
+    from shapely.geometry import shape
+except ImportError:
+    st.error("Librerías geoespaciales no encontradas. Verifica requirements.txt.")
 
 try:
     import h3
 except ImportError:
-    st.error("Módulo geoespacial no encontrado. Verifica requirements.txt.")
+    st.error("Módulo geoespacial 'h3' no encontrado. Verifica requirements.txt.")
 
 try:
     from groq import Groq
@@ -49,6 +56,18 @@ st.markdown("""
         border-radius: 8px;
         margin-bottom: 12px;
         box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+    }
+
+    .predio-badge {
+        background: #EFF6FF;
+        border: 1px solid #BFDBFE;
+        color: #1D4ED8;
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-size: 0.8rem;
+        font-weight: 700;
+        display: inline-block;
+        margin-bottom: 8px;
     }
 
     .memo-panel {
@@ -106,13 +125,13 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. SISTEMA DE TELEMETRÍA (ANALYTICS DEVELOPER) ---
+# --- 2. SISTEMA DE TELEMETRÍA ---
 def registrar_telemetria(accion, data_mza, sup_lote, m2_const, residual_m2):
     try:
         log_file = "telemetria_uso_scout.csv"
         registro = {
             "fecha_hora": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "modulo": "DEVELOPER_HBU",
+            "modulo": "DEVELOPER_HBU_PREDIO",
             "accion": accion,
             "municipio": str(data_mza.get("NOM_MUN", "S/D")),
             "cvegeo_mza": str(data_mza.get("cvegeo_mza", "S/D")),
@@ -131,14 +150,38 @@ def registrar_telemetria(accion, data_mza, sup_lote, m2_const, residual_m2):
     except Exception:
         pass
 
-# --- 3. FUNCIONES AUXILIARES GEOGRÁFICAS ---
+# --- 3. CONSULTA BAJO DEMANDA DE PREDIO CATASTRAL (ZAPOPAN WFS) ---
+@st.cache_data(ttl=3600)
+def consultar_predio_catastral(lat, lon, margen_metros=45.0):
+    """Descarga el polígono exacto del predio y su superficie oficial mediante BBOX ultraligero."""
+    delta_deg = margen_metros / 111139.0
+    bbox_str = f"{lon - delta_deg},{lat - delta_deg},{lon + delta_deg},{lat + delta_deg}"
+    url_wfs = "https://mapa.zapopan.gob.mx:8000/geoserver/geomatica/ows"
+    params = {
+        "service": "WFS",
+        "version": "1.0.0",
+        "request": "GetFeature",
+        "typeName": "geomatica:zpn_predios",
+        "outputFormat": "application/json",
+        "srsName": "EPSG:4326",
+        "bbox": bbox_str
+    }
+    try:
+        r = requests.get(url_wfs, params=params, timeout=4)
+        if r.status_code == 200:
+            data_geojson = r.json()
+            features = data_geojson.get("features", [])
+            if features:
+                gdf_p = gpd.GeoDataFrame.from_features(data_geojson, crs="EPSG:4326")
+                return gdf_p
+    except Exception:
+        pass
+    return None
+
+# --- 4. FUNCIONES AUXILIARES GEOGRÁFICAS ---
 def latlng_to_h3_cell(lat, lon, res=9):
     try: return h3.latlng_to_cell(lat, lon, res)
     except AttributeError: return h3.geo_to_h3(lat, lon, res)
-
-def get_h3_disk(cell, k=1):
-    try: return h3.grid_disk(cell, k)
-    except AttributeError: return h3.k_ring(cell, k)
 
 def decimal_to_dms(deg, is_lat=True):
     direction = ("N" if deg >= 0 else "S") if is_lat else ("E" if deg >= 0 else "W")
@@ -148,7 +191,7 @@ def decimal_to_dms(deg, is_lat=True):
     s = round((deg - d - m/60) * 3600, 2)
     return f"{direction} {d}°{m:02d}'{s:05.2f}\""
 
-# --- 4. TABULADOR OFICIAL DE COSTOS PARAMÉTRICOS CMIC / MERCADO ---
+# Tabulador de Costos Paramétricos CMIC
 PARAMETRICOS_CMIC = {
     "Torre Departamentos Residencial Plus (10-15+ niveles)": {
         "costo_obra": 24500.0, "precio_venta": 58000.0, "soft_costs_pct": 0.16
@@ -187,27 +230,27 @@ def load_engines():
     return df_mza, tree_mza, df_poi
 
 COLOR_MAP = {
-    'TRANSPORTE_PUBLICO':      [2, 132, 199, 240],   # Azul cielo
-    'RETAIL_ANCLA':            [234, 88, 12, 240],   # Naranja quemado
-    'SALUD_HOSPITALARIA':       [220, 38, 38, 240],   # Rojo
-    'FARMACIA_SALUD_RETAIL':    [239, 68, 68, 240],   # Rojo coral
-    'EDUCACION':                [37, 99, 235, 240],   # Azul marino
-    'FINANCIERO_SEGUROS':       [202, 138, 4, 240],   # Dorado
-    'GASTRONOMIA':              [16, 185, 129, 240],  # Verde esmeralda
-    'ENTRETENIMIENTO_FITNESS':  [5, 150, 105, 240],   # Verde bosque
-    'HOTELERIA_TURISMO':        [147, 51, 234, 240],  # Púrpura
-    'CORPORATIVO_SERVICIOS':    [79, 70, 229, 240],   # Índigo
-    'MEJORAMIENTO_HOGAR':       [120, 53, 15, 240],   # Café oscuro
-    'AUTOMOTRIZ_COMBUSTIBLE':   [219, 39, 119, 240],  # Magenta
-    'RETAIL_CONVENIENCIA':      [100, 116, 139, 200], # Gris pizarra
-    'RETAIL_ESPECIALIZADO':     [190, 24, 93, 220],   # Rosa oscuro
-    'SERVICIOS_PERSONALES':     [71, 85, 105, 180],   # Gris
-    'GOBIERNO_INSTITUCIONAL':   [30, 41, 59, 220],    # Azul noche
-    'LOGISTICA_LAST_MILE':      [37, 99, 235, 220]    # Azul
+    'TRANSPORTE_PUBLICO':      [2, 132, 199, 240],
+    'RETAIL_ANCLA':            [234, 88, 12, 240],
+    'SALUD_HOSPITALARIA':       [220, 38, 38, 240],
+    'FARMACIA_SALUD_RETAIL':    [239, 68, 68, 240],
+    'EDUCACION':                [37, 99, 235, 240],
+    'FINANCIERO_SEGUROS':       [202, 138, 4, 240],
+    'GASTRONOMIA':              [16, 185, 129, 240],
+    'ENTRETENIMIENTO_FITNESS':  [5, 150, 105, 240],
+    'HOTELERIA_TURISMO':        [147, 51, 234, 240],
+    'CORPORATIVO_SERVICIOS':    [79, 70, 229, 240],
+    'MEJORAMIENTO_HOGAR':       [120, 53, 15, 240],
+    'AUTOMOTRIZ_COMBUSTIBLE':   [219, 39, 119, 240],
+    'RETAIL_CONVENIENCIA':      [100, 116, 139, 200],
+    'RETAIL_ESPECIALIZADO':     [190, 24, 93, 220],
+    'SERVICIOS_PERSONALES':     [71, 85, 105, 180],
+    'GOBIERNO_INSTITUCIONAL':   [30, 41, 59, 220],
+    'LOGISTICA_LAST_MILE':      [37, 99, 235, 220]
 }
 
 # --- 6. GENERADOR DE MEMO DE COMITÉ HBU CON INTELIGENCIA ARTIFICIAL ---
-def generar_memo_inversionista(data_mza, nearby_df, sup_lote, m2_desplante, m2_const, viv_max, pob_diu, arquetipo, gdv, costo_obra, residual_tierra, residual_m2, prototipo_nombre):
+def generar_memo_inversionista(data_mza, nearby_df, sup_lote, m2_desplante, m2_const, viv_max, pob_diu, arquetipo, gdv, costo_obra, residual_tierra, residual_m2, prototipo_nombre, es_predio_oficial):
     groq_key = st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", None))
     if not groq_key:
         return "⚠️ Motor de Inteligencia Artificial no autenticado. Configura la clave en Secrets."
@@ -221,30 +264,23 @@ def generar_memo_inversionista(data_mza, nearby_df, sup_lote, m2_desplante, m2_c
     dot_status = str(data_mza.get('dot_acceso', 'SIN_COBERTURA'))
     pct_airbnb = float(pd.to_numeric(data_mza.get('pct_uso_temp'), errors='coerce') or 0.0) * 100
     niveles = int(data_mza.get('altura_max')) if pd.notna(data_mza.get('altura_max')) else 3
-    pob_2024 = int(data_mza.get('poblacion_proyectada_2024', data_mza.get('POBTOT', 0)))
-    viv_nuevas = int(data_mza.get('viviendas_nuevas_post2020', 0))
-    status_urb = str(data_mza.get('status_urbanizacion', 'Consolidado Histórico'))
+    origen_sup = "LEVANTAMIENTO CATASTRAL OFICIAL (POLÍGONO VECTORIAL)" if es_predio_oficial else "ESTIMACIÓN PARAMÉTRICA"
 
     contexto = f"""
-    UBICACIÓN: {data_mza.get('NOM_MUN', 'Jalisco')} | CLAVE CATASTRAL: {data_mza.get('cvegeo_mza', 'S/D')}
-    SUPERFICIE PREDIO: {sup_lote:,.2f} m² de terreno.
-    PROTOTIPO PARAMÉTRICO CMIC SELECCIONADO: {prototipo_nombre}
+    UBICACIÓN: {data_mza.get('NOM_MUN', 'Jalisco')} | CLAVE MANZANA: {data_mza.get('cvegeo_mza', 'S/D')}
+    SUPERFICIE DEL PREDIO: {sup_lote:,.2f} m² [{origen_sup}].
+    PROTOTIPO PARAMÉTRICO CMIC: {prototipo_nombre}
     NORMA LEGAL: Uso {data_mza.get('tipo_uso', 'S/D')}, CUS {data_mza.get('cus', 0)}, COS {data_mza.get('cos', 0)*100:.0f}%, Niveles máx autorizados: {niveles} pisos.
-    VOLUMETRÍA AUTORIZADA: Huella PB: {m2_desplante:,.2f} m² | Construcción Total: {m2_const:,.2f} m² | Capacidad: {viv_max} viv.
+    VOLUMETRÍA CALCULADA: Huella PB: {m2_desplante:,.2f} m² | Construcción Total: {m2_const:,.2f} m² | Capacidad: {viv_max} viv.
     FINANZAS PRO-FORMA RESIDUALES:
     - Ventas Brutas Proyectadas (GDV): ${gdv:,.2f} MXN
     - Costo de Obra Directo + Soft Costs (CMIC): ${costo_obra:,.2f} MXN
     - Margen de Utilidad Objetivo Desarrollador: 20%
     - VALOR MÁXIMO DE OFERTA POR LA TIERRA: ${residual_tierra:,.2f} MXN (${residual_m2:,.2f} MXN/m² de terreno).
-    CONECTIVIDAD DOT: {dot_status} (Transporte a < 500m).
+    CONECTIVIDAD DOT: {dot_status} (Transporte masivo a < 500m).
     DEMOGRAFÍA: NSE {data_mza.get('nse_score', 0):.1f}/100, Población flotante diurna: {pob_diu:,} pers ({arquetipo}).
     MERCADO RENTAS CORTAS: {pct_airbnb:.1f}% de vivienda temporal.
     COMPETENCIA Y ANCLAS EN 800M: {top_pois if top_pois else 'Sin anclas identificadas'}.
-    # Agregar al texto del contexto:
-    AUDITORÍA SATELITAL DE CRECIMIENTO:
-    - Población Proyectada 2024 (Satelital): {pob_2024:,} habitantes (vs. Censo 2020: {data_mza.get('POBTOT', 0)} hab).
-    - Viviendas Nuevas Construidas Post-2020: +{viv_nuevas:,} unidades físicas detectadas por visión computacional.
-    - Estatus de Urbanización: {status_urb}.
     """
 
     prompt = f"""
@@ -264,7 +300,7 @@ def generar_memo_inversionista(data_mza, nearby_df, sup_lote, m2_desplante, m2_c
             model="openai/gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.25,
-            max_tokens=2500
+            max_tokens=1000
         )
         return completion.choices[0].message.content
     except Exception as e:
@@ -273,7 +309,7 @@ def generar_memo_inversionista(data_mza, nearby_df, sup_lote, m2_desplante, m2_c
 # --- 7. INTERFAZ PRINCIPAL DEVELOPER ---
 def main():
     st.markdown("<p style='text-align:center; color:#0A2540; letter-spacing:4px; margin-bottom:0; font-weight:800; font-size:1.35rem;'>HBU-NAVIGATOR | DEVELOPER & PE</p>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align:center; color:#64748B; font-size:0.8rem; margin-top:2px;'>PREFACTIBILIDAD NORMATIVA Y MODELO RESIDUAL DE TIERRA (TABULADOR CMIC)</p>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align:center; color:#64748B; font-size:0.8rem; margin-top:2px;'>PREFACTIBILIDAD A NIVEL PREDIO CATASTRAL Y MODELO RESIDUAL DE TIERRA</p>", unsafe_allow_html=True)
     st.markdown("<hr style='margin:10px auto; width:30%; opacity:0.2;'>", unsafe_allow_html=True)
 
     # --- PANEL DE BÚSQUEDA TRIPLE ---
@@ -285,7 +321,11 @@ def main():
     with tab_dir:
         col_txt, col_btn = st.columns([3, 1])
         with col_txt:
-            direccion_input = st.text_input("Dirección o C.P.:", placeholder="ej. Circuito Madrigal 4295, Zapopan o 45110", label_visibility="collapsed")
+            direccion_input = st.text_input(
+                "Dirección o C.P.:",
+                placeholder="ej. Circuito Madrigal 4295, Zapopan o 45110",
+                label_visibility="collapsed"
+            )
         with col_btn:
             buscar_btn = st.button("BUSCAR PREDIO")
 
@@ -319,8 +359,9 @@ def main():
 
     with tab_coord:
         c1, c2, c3 = st.columns([1.5, 1.5, 1])
-        m_lat = c1.number_input("Latitud", value=20.6976, format="%.6f")
-        m_lon = c2.number_input("Longitud", value=-103.4110, format="%.6f")
+        # Coordenadas de prueba en Valle Real / Ventura Vertical
+        m_lat = c1.number_input("Latitud", value=20.7145, format="%.6f")
+        m_lon = c2.number_input("Longitud", value=-103.4365, format="%.6f")
         if c3.button("FIJAR COORDENADAS"):
             st.session_state.location = {"lat": m_lat, "lon": m_lon, "acc": 0.0}
             st.rerun()
@@ -334,12 +375,24 @@ def main():
 
         df_mza, tree_mza, df_poi = load_engines()
 
-        # Búsqueda Manzana más cercana
+        # 1. Búsqueda de Manzana más cercana
         dist_deg, idx_mza = tree_mza.query(np.array([lat_now, lon_now]))
         data = df_mza.iloc[idx_mza]
         dist_m = dist_deg * 111139
 
-        # Consulta de Comercios en Anillo de 800m
+        # 2. CONSULTA BAJO DEMANDA DEL PREDIO CATASTRAL EN VIVO (ZAPOPAN WFS)
+        gdf_predio = consultar_predio_catastral(lat_now, lon_now)
+        es_predio_oficial = gdf_predio is not None and not gdf_predio.empty
+
+        sup_oficial_m2 = None
+        if es_predio_oficial:
+            # Extraer superficie oficial calculada por el Catastro
+            try:
+                sup_oficial_m2 = float(gdf_predio.iloc[0].get('shape_area', 0.0))
+            except Exception:
+                sup_oficial_m2 = None
+
+        # 3. Consulta de Comercios en Anillo de 800m
         radio_800m_deg = 800.0 / 111139.0
         tree_poi = KDTree(df_poi[['latitud', 'longitud']].values)
         indices_800m = tree_poi.query_ball_point([lat_now, lon_now], r=radio_800m_deg)
@@ -362,10 +415,10 @@ def main():
             dot_bg    = "#DCFCE7" if "APTO" in dot_label else "#FEE2E2"
             st.markdown(f"""
                 <div class="hud-panel">
-                    <p style="color:#64748B; font-size:0.75rem; margin:0; font-weight:600;">AUDITORÍA LEGAL Y URBANÍSTICA</p>
+                    <p style="color:#64748B; font-size:0.75rem; margin:0; font-weight:600;">AUDITORÍA CATASTRAL Y LEGAL</p>
                     <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
-                        <span style="color:#0A2540; font-weight:800; font-size:0.9rem;">PREFACTIBILIDAD</span>
-                        <span class="status-pill">VALIDADO</span>
+                        <span style="color:#0A2540; font-weight:800; font-size:0.9rem;">{'POLÍGONO PREDIO OFICIAL' if es_predio_oficial else 'PREFACTIBILIDAD'}</span>
+                        <span class="status-pill">{'CATASTRO OK' if es_predio_oficial else 'MANZANA OK'}</span>
                     </div>
                     <hr style="opacity:0.15; margin:8px 0;">
                     <p style="color:#64748B; font-size:0.75rem; margin:0; font-weight:600;">INCENTIVO DOT</p>
@@ -391,7 +444,7 @@ def main():
         with col_der:
             st.markdown(f"""
                 <div class="hud-panel">
-                    <p style="color:#64748B; font-size:0.75rem; margin:0; font-weight:600;">EXPEDIENTE DEL LOTE</p>
+                    <p style="color:#64748B; font-size:0.75rem; margin:0; font-weight:600;">EXPEDIENTE DEL PREDIO</p>
                     <p style="color:#0A2540; font-weight:800; margin:2px 0 0 0; font-size:0.9rem;">{data.get('NOM_MUN', 'JALISCO')}</p>
                     <hr style="opacity:0.15; margin:8px 0;">
                     <p style="color:#64748B; font-size:0.75rem; margin:0; font-weight:600;">CLAVE CATASTRAL MANZANA</p>
@@ -406,7 +459,14 @@ def main():
         st.markdown('<div class="hud-panel">', unsafe_allow_html=True)
         st.markdown("<p style='color:#0A2540; font-weight:800; font-size:0.9rem; letter-spacing:1px; margin-bottom:8px;'>💰 MODELO FINANCIERO RESIDUAL DE TIERRA (TABULADOR OFICIAL CMIC)</p>", unsafe_allow_html=True)
 
-        # Selector de Prototipo Paramétrico Oficial CMIC
+        # Alerta si se cargó la superficie oficial del lote
+        if es_predio_oficial and sup_oficial_m2:
+            st.markdown(f"""
+                <div class="predio-badge">
+                    🏛️ Polígono Catastral Oficial Detectado: Superficie Registrada = {sup_oficial_m2:,.2f} m²
+                </div>
+            """, unsafe_allow_html=True)
+
         prototipo_seleccionado = st.selectbox(
             "🏗️ Selecciona el Prototipo de Construcción a Evaluar (Costos CMIC):",
             list(PARAMETRICOS_CMIC.keys()),
@@ -419,13 +479,17 @@ def main():
         col_f1, col_f2, col_f3 = st.columns(3)
 
         with col_f1:
-            sup_default = float(data.get('superficie_terreno_m2', 1000.0))
-            if sup_default > 40000 or sup_default <= 0: sup_default = 1000.0
+            # Si el Catastro devolvió una superficie oficial, la usamos como valor por defecto
+            if es_predio_oficial and sup_oficial_m2 and sup_oficial_m2 > 10:
+                sup_default = sup_oficial_m2
+            else:
+                sup_default = float(data.get('superficie_terreno_m2', 1000.0))
+                if sup_default > 40000 or sup_default <= 0: sup_default = 1000.0
             
             sup_lote = st.number_input(
                 "Superficie del Terreno (m²):",
-                min_value=50.0, max_value=500000.0, value=round(sup_default, 2), step=50.0,
-                help="Superficie real del lote bajo análisis."
+                min_value=50.0, max_value=1000000.0, value=round(sup_default, 2), step=50.0,
+                help="Superficie oficial del terreno (extraída automáticamente si existe polígono catastral)."
             )
 
         cus_val = float(data.get('cus', 1.8))
@@ -532,7 +596,7 @@ def main():
             with st.spinner("Compilando corrida pro-forma y memorándum de inversión con Inteligencia Artificial..."):
                 memo = generar_memo_inversionista(
                     data, nearby_pois, sup_lote, m2_desplante_real, m2_construccion_real,
-                    viv_max_real, pob_diu, arquetipo, gdv_total, costo_total_desarrollo, residual_tierra, residual_m2_tierra, prototipo_seleccionado
+                    viv_max_real, pob_diu, arquetipo, gdv_total, costo_total_desarrollo, residual_tierra, residual_m2_tierra, prototipo_seleccionado, es_predio_oficial
                 )
                 st.markdown(f"""
                     <div class="memo-panel">
@@ -550,7 +614,7 @@ def main():
             st.markdown('<div class="hud-panel">', unsafe_allow_html=True)
             st.markdown("<p style='color:#0A2540; font-weight:700; font-size:0.85rem; letter-spacing:1px; border-bottom:1px solid #E2E8F0; padding-bottom:5px; margin-bottom:8px;'>⚖️ CAPACIDAD NORMATIVA AUTORIZADA</p>", unsafe_allow_html=True)
             m1, m2 = st.columns(2)
-            m1.metric("Uso de Suelo", f"{data.get('tipo_uso', 'S/D')}")
+            m1.metric("Zonificación", f"{data.get('tipo_uso', 'S/D')}")
             alt_val = data.get('altura_max')
             niveles = int(alt_val) if pd.notna(alt_val) else 3
             m2.metric("Límite de Niveles", f"{niveles} Pisos")
@@ -566,16 +630,10 @@ def main():
 
         with r_col2:
             st.markdown('<div class="hud-panel">', unsafe_allow_html=True)
-            st.markdown("<p style='color:#0A2540; font-weight:700; font-size:0.85rem; letter-spacing:1px; border-bottom:1px solid #E2E8F0; padding-bottom:5px; margin-bottom:8px;'>👥 MERCADO Y AUDITORÍA SATELITAL (2024)</p>", unsafe_allow_html=True)
-
-            pob_censo = int(data.get('POBTOT', 0)) if pd.notna(data.get('POBTOT')) else 0
-            pob_2024 = int(data.get('poblacion_proyectada_2024', pob_censo)) if pd.notna(data.get('poblacion_proyectada_2024')) else pob_censo
-            viv_nuevas = int(data.get('viviendas_nuevas_post2020', 0)) if pd.notna(data.get('viviendas_nuevas_post2020')) else 0
-            status_urb = str(data.get('status_urbanizacion', 'Consolidado Histórico'))
+            st.markdown("<p style='color:#0A2540; font-weight:700; font-size:0.85rem; letter-spacing:1px; border-bottom:1px solid #E2E8F0; padding-bottom:5px; margin-bottom:8px;'>👥 MERCADO Y DINÁMICA DE ENTORNO</p>", unsafe_allow_html=True)
 
             c1, c2 = st.columns(2)
-            # Mostrar la población actualizada por satélite
-            c1.metric("Población 2024 (Satelital)", f"{pob_2024:,} hab", f"+{viv_nuevas} Viv Nuevas" if viv_nuevas > 0 else "Estable")
+            c1.metric("Población Residente", f"{pob_res:,} hab")
             c2.metric("Población Diurna", f"{pob_diu:,} pers", f"{ratio_f:.1f}x Flujo")
 
             c3, c4 = st.columns(2)
@@ -583,23 +641,20 @@ def main():
             pct_airbnb = float(pd.to_numeric(data.get('pct_uso_temp'), errors='coerce') or 0.0) * 100
             c4.metric("Tasa Renta Corta / Airbnb", f"{pct_airbnb:.1f}%")
 
-            # Badge de Crecimiento Satelital
-            color_badge = "#16A34A" if "Reciente" in status_urb else ("#2563EB" if "Activo" in status_urb else "#475569")
-            bg_badge    = "#DCFCE7" if "Reciente" in status_urb else ("#DBEAFE" if "Activo" in status_urb else "#F1F5F9")
             st.markdown(f"""
                 <div style="margin-top: 8px; text-align: center;">
-                    <span class="archetype-pill" style="background: {bg_badge}; border: 1px solid {color_badge}; color: {color_badge};">
-                        🛰️ {status_urb.upper()}
+                    <span class="archetype-pill" style="background: {badge_bg}; border: 1px solid {badge_color}; color: {badge_color};">
+                        ● ARQUETIPO: {arquetipo}
                     </span>
                 </div>
             """, unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
 
-        # --- SECCIÓN INFERIOR: MAPA CON ANILLOS 400M Y 800M (MODO CLARO CARTO POSITRON) ---
+        # --- SECCIÓN INFERIOR: MAPA CON POLÍGONO DEL PREDIO CATASTRAL + ANILLOS 400M Y 800M ---
         st.markdown('<div class="hud-panel">', unsafe_allow_html=True)
         st.markdown(f"""
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
-                <span style="color:#0A2540; font-weight:700; font-size:0.85rem; letter-spacing:1px;'>🗺️ ÁREA DE INFLUENCIA: ANILLO INMEDIATO 400M Y PRIMARIO 800M</span>
+                <span style="color:#0A2540; font-weight:700; font-size:0.85rem; letter-spacing:1px;'>🗺️ CARTOGRAFÍA: POLÍGONO DEL PREDIO + ANILLOS CAMINABLES 400M Y 800M</span>
                 <span style="color:#2563EB; font-size:0.75rem; font-family:'JetBrains Mono'; font-weight:600;">{len(nearby_pois)} NODOS EN PANTALLA</span>
             </div>
         """, unsafe_allow_html=True)
@@ -623,8 +678,8 @@ def main():
         u_lon = float(lon_now)
 
         base_points = pd.DataFrame([
-            {"name": "Ubicación Scout", "lat": u_lat, "lon": u_lon, "color": [37, 99, 235, 255], "radius": 13},
-            {"name": "Predio Objetivo HBU", "lat": node_lat, "lon": node_lon, "color": [10, 37, 64, 255], "radius": 18}
+            {"name": "Ubicación Scout", "lat": u_lat, "lon": u_lon, "color": [37, 99, 235, 255], "radius": 12},
+            {"name": "Centroide Lote", "lat": node_lat, "lon": node_lon, "color": [10, 37, 64, 255], "radius": 16}
         ])
 
         line_data = pd.DataFrame([{"start": [u_lon, u_lat], "end": [node_lon, node_lat]}])
@@ -637,11 +692,12 @@ def main():
         view_state = pdk.ViewState(
             latitude=(u_lat + node_lat) / 2,
             longitude=(u_lon + node_lon) / 2,
-            zoom=15.0,
+            zoom=15.5,
             pitch=25
         )
 
         layers = [
+            # 1. Anillos concéntricos caminables en metros reales
             pdk.Layer(
                 "ScatterplotLayer",
                 rings_data,
@@ -654,6 +710,7 @@ def main():
                 filled=True,
                 pickable=False
             ),
+            # 2. Línea Scout-Predio
             pdk.Layer(
                 "LineLayer",
                 line_data,
@@ -662,6 +719,7 @@ def main():
                 get_color=[10, 37, 64, 220],
                 get_width=3
             ),
+            # 3. Puntos Scout y Centroide
             pdk.Layer(
                 "ScatterplotLayer",
                 base_points,
@@ -672,8 +730,34 @@ def main():
             )
         ]
 
+        # 4. CAPA VECTORIAL DEL POLÍGONO DEL PREDIO OFICIAL (SI SE LOCALIZÓ EN CATASTRO)
+        if es_predio_oficial:
+            try:
+                poly_geom = gdf_predio.geometry.iloc[0]
+                if poly_geom.geom_type == 'MultiPolygon':
+                    poly_geom = list(poly_geom.geoms)[0]
+                coords_predio = [[coord[0], coord[1]] for coord in poly_geom.exterior.coords]
+                df_poly_predio = pd.DataFrame([{'polygon': coords_predio, 'name': 'LOTE CATASTRAL OFICIAL'}])
+
+                layer_predio_polygon = pdk.Layer(
+                    "PolygonLayer",
+                    df_poly_predio,
+                    get_polygon="polygon",
+                    get_fill_color=[37, 99, 235, 45],       # Azul translúcido
+                    get_line_color=[10, 37, 64, 255],       # Contorno azul marino sólido
+                    get_line_width=3,
+                    line_width_min_pixels=2,
+                    filled=True,
+                    stroked=True,
+                    pickable=True
+                )
+                layers.insert(0, layer_predio_polygon)
+            except Exception:
+                pass
+
+        # 5. Capa de Comercios y Paradas en el Anillo
         if not nearby_pois.empty:
-            layers.insert(1, pdk.Layer(
+            layers.append(pdk.Layer(
                 "ScatterplotLayer",
                 nearby_pois,
                 get_position=["longitud", "latitud"],
