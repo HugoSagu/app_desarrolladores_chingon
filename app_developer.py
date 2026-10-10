@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""HBU-NAVIGATOR | Terminal Institucional de Prefactibilidad para Desarrolladores (Con Predio Catastral en Vivo)"""
+"""HBU-NAVIGATOR | Terminal Institucional de Prefactibilidad para Desarrolladores (Con Comparables de Mercado $/M²)"""
 
 import streamlit as st
 import pandas as pd
@@ -43,11 +43,7 @@ st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700;800&display=swap');
 
-    .stApp {
-        background-color: #FFFFFF;
-        color: #1E293B;
-        font-family: 'Inter', sans-serif;
-    }
+    .stApp { background-color: #FFFFFF; color: #1E293B; font-family: 'Inter', sans-serif; }
 
     .hud-panel {
         background: #F8FAFC;
@@ -131,7 +127,7 @@ def registrar_telemetria(accion, data_mza, sup_lote, m2_const, residual_m2):
         log_file = "telemetria_uso_scout.csv"
         registro = {
             "fecha_hora": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "modulo": "DEVELOPER_HBU_PREDIO",
+            "modulo": "DEVELOPER_HBU_MARKET",
             "accion": accion,
             "municipio": str(data_mza.get("NOM_MUN", "S/D")),
             "cvegeo_mza": str(data_mza.get("cvegeo_mza", "S/D")),
@@ -153,7 +149,6 @@ def registrar_telemetria(accion, data_mza, sup_lote, m2_const, residual_m2):
 # --- 3. CONSULTA BAJO DEMANDA DE PREDIO CATASTRAL (ZAPOPAN WFS) ---
 @st.cache_data(ttl=3600)
 def consultar_predio_catastral(lat, lon, margen_metros=45.0):
-    """Descarga el polígono exacto del predio y su superficie oficial mediante BBOX ultraligero."""
     delta_deg = margen_metros / 111139.0
     bbox_str = f"{lon - delta_deg},{lat - delta_deg},{lon + delta_deg},{lat + delta_deg}"
     url_wfs = "https://mapa.zapopan.gob.mx:8000/geoserver/geomatica/ows"
@@ -191,43 +186,50 @@ def decimal_to_dms(deg, is_lat=True):
     s = round((deg - d - m/60) * 3600, 2)
     return f"{direction} {d}°{m:02d}'{s:05.2f}\""
 
-# Tabulador de Costos Paramétricos CMIC
 PARAMETRICOS_CMIC = {
     "Torre Departamentos Residencial Plus (10-15+ niveles)": {
-        "costo_obra": 24500.0, "precio_venta": 58000.0, "soft_costs_pct": 0.16
+        "costo_obra": 24500.0, "precio_venta_default": 58000.0, "soft_costs_pct": 0.16
     },
     "Torre Departamentos Media (4-8 niveles)": {
-        "costo_obra": 18500.0, "precio_venta": 42000.0, "soft_costs_pct": 0.14
+        "costo_obra": 18500.0, "precio_venta_default": 42000.0, "soft_costs_pct": 0.14
     },
     "Plaza Comercial / Strip Mall con Ancla (1-2 niveles)": {
-        "costo_obra": 14500.0, "precio_venta": 38000.0, "soft_costs_pct": 0.12
+        "costo_obra": 14500.0, "precio_venta_default": 38000.0, "soft_costs_pct": 0.12
     },
     "Torre de Oficinas Corporativas": {
-        "costo_obra": 22500.0, "precio_venta": 52000.0, "soft_costs_pct": 0.15
+        "costo_obra": 22500.0, "precio_venta_default": 52000.0, "soft_costs_pct": 0.15
     },
     "Nave Industrial / Bodega Logística de Última Milla": {
-        "costo_obra": 9500.0,  "precio_venta": 23000.0, "soft_costs_pct": 0.10
+        "costo_obra": 9500.0,  "precio_venta_default": 23000.0, "soft_costs_pct": 0.10
     },
     "Personalizado (Ajuste Manual)": {
-        "costo_obra": 19000.0, "precio_venta": 45000.0, "soft_costs_pct": 0.15
+        "costo_obra": 19000.0, "precio_venta_default": 45000.0, "soft_costs_pct": 0.15
     }
 }
 
-# --- 5. CARGA DE MOTORES ESPACIALES ---
+# --- 5. CARGA DE MOTORES ESPACIALES (MANZANAS, DENUE Y COMPARABLES) ---
 @st.cache_resource
 def load_engines():
     base_dir = os.path.dirname(__file__)
-
+    
+    # 1. Base Manzanas
     path_mza = os.path.join(base_dir, 'data', 'master_jalisco_hbu_scout.parquet')
     if not os.path.exists(path_mza): path_mza = 'master_jalisco_hbu_scout.parquet'
     df_mza = pd.read_parquet(path_mza)
     tree_mza = KDTree(df_mza[['lat_centroide', 'lon_centroide']].values)
 
+    # 2. Base DENUE
     path_poi = os.path.join(base_dir, 'data', 'jalisco_denue_scout.parquet')
     if not os.path.exists(path_poi): path_poi = 'jalisco_denue_scout.parquet'
     df_poi = pd.read_parquet(path_poi)
 
-    return df_mza, tree_mza, df_poi
+    # 3. Base Comparables de Mercado ($/m²)
+    path_comp = os.path.join(base_dir, 'data', 'mercado_comparables_jalisco.parquet')
+    if not os.path.exists(path_comp): path_comp = 'mercado_comparables_jalisco.parquet'
+    df_comp = pd.read_parquet(path_comp) if os.path.exists(path_comp) else pd.DataFrame()
+    tree_comp = KDTree(df_comp[['latitud', 'longitud']].values) if not df_comp.empty else None
+
+    return df_mza, tree_mza, df_poi, df_comp, tree_comp
 
 COLOR_MAP = {
     'TRANSPORTE_PUBLICO':      [2, 132, 199, 240],
@@ -250,7 +252,7 @@ COLOR_MAP = {
 }
 
 # --- 6. GENERADOR DE MEMO DE COMITÉ HBU CON INTELIGENCIA ARTIFICIAL ---
-def generar_memo_inversionista(data_mza, nearby_df, sup_lote, m2_desplante, m2_const, viv_max, pob_diu, arquetipo, gdv, costo_obra, residual_tierra, residual_m2, prototipo_nombre, es_predio_oficial):
+def generar_memo_inversionista(data_mza, nearby_df, sup_lote, m2_desplante, m2_const, viv_max, pob_diu, arquetipo, gdv, costo_obra, residual_tierra, residual_m2, prototipo_nombre, es_predio_oficial, p_venta_usado, p_renta_mediana):
     groq_key = st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", None))
     if not groq_key:
         return "⚠️ Motor de Inteligencia Artificial no autenticado. Configura la clave en Secrets."
@@ -267,17 +269,20 @@ def generar_memo_inversionista(data_mza, nearby_df, sup_lote, m2_desplante, m2_c
     origen_sup = "LEVANTAMIENTO CATASTRAL OFICIAL (POLÍGONO VECTORIAL)" if es_predio_oficial else "ESTIMACIÓN PARAMÉTRICA"
 
     contexto = f"""
-    UBICACIÓN: {data_mza.get('NOM_MUN', 'Jalisco')} | CLAVE MANZANA: {data_mza.get('cvegeo_mza', 'S/D')}
-    SUPERFICIE DEL PREDIO: {sup_lote:,.2f} m² [{origen_sup}].
+    UBICACIÓN: {data_mza.get('NOM_MUN', 'Jalisco')} | CLAVE CATASTRAL: {data_mza.get('cvegeo_mza', 'S/D')}
+    SUPERFICIE PREDIO: {sup_lote:,.2f} m² [{origen_sup}].
     PROTOTIPO PARAMÉTRICO CMIC: {prototipo_nombre}
-    NORMA LEGAL: Uso {data_mza.get('tipo_uso', 'S/D')}, CUS {data_mza.get('cus', 0)}, COS {data_mza.get('cos', 0)*100:.0f}%, Niveles máx autorizados: {niveles} pisos.
+    BENCHMARK DE MERCADO REAL EN ZONA:
+    - Precio Venta Referencia Mercado: ${p_venta_usado:,.2f} MXN/m²
+    - Renta Mensual Estimada Mercado: ${p_renta_mediana:,.2f} MXN/m²/mes
+    NORMA LEGAL: Uso {data_mza.get('tipo_uso', 'S/D')}, CUS {data_mza.get('cus', 0)}, COS {data_mza.get('cos', 0)*100:.0f}%, Niveles máx: {niveles} pisos.
     VOLUMETRÍA CALCULADA: Huella PB: {m2_desplante:,.2f} m² | Construcción Total: {m2_const:,.2f} m² | Capacidad: {viv_max} viv.
     FINANZAS PRO-FORMA RESIDUALES:
     - Ventas Brutas Proyectadas (GDV): ${gdv:,.2f} MXN
     - Costo de Obra Directo + Soft Costs (CMIC): ${costo_obra:,.2f} MXN
     - Margen de Utilidad Objetivo Desarrollador: 20%
     - VALOR MÁXIMO DE OFERTA POR LA TIERRA: ${residual_tierra:,.2f} MXN (${residual_m2:,.2f} MXN/m² de terreno).
-    CONECTIVIDAD DOT: {dot_status} (Transporte masivo a < 500m).
+    CONECTIVIDAD DOT: {dot_status} (Transporte masivo a pie a < 500m).
     DEMOGRAFÍA: NSE {data_mza.get('nse_score', 0):.1f}/100, Población flotante diurna: {pob_diu:,} pers ({arquetipo}).
     MERCADO RENTAS CORTAS: {pct_airbnb:.1f}% de vivienda temporal.
     COMPETENCIA Y ANCLAS EN 800M: {top_pois if top_pois else 'Sin anclas identificadas'}.
@@ -285,13 +290,13 @@ def generar_memo_inversionista(data_mza, nearby_df, sup_lote, m2_desplante, m2_c
 
     prompt = f"""
     Eres el Chief Investment Officer (CIO) de un fondo institucional de desarrollo inmobiliario en México.
-    Emite un MEMORÁNDUM DE PREFACTIBILIDAD Y MAYOR Y MEJOR USO (HBU) con base en la siguiente corrida territorial:
+    Emite un MEMORÁNDUM DE PREFACTIBILIDAD Y MAYOR Y MEJOR USO (HBU) con base en la siguiente corrida territorial y de mercado:
     {contexto}
 
     Estructura tu dictamen en 3 secciones ejecutivas estrictas:
-    1. 🎯 **Mayor y Mejor Uso (HBU) y Mix de Producto**: Evalúa el prototipo seleccionado ({prototipo_nombre}) y define la mezcla óptima (% m² locales comerciales en PB vs. % m² departamentos u oficinas arriba). Justifica si conviene venta tradicional o renta institucional (Pool/Multifamily/Airbnb).
-    2. 💰 **Viabilidad Financiera y Precio Máximo de Oferta**: Explica por qué el fondo no debe pagar más de ${residual_m2:,.0f} MXN/m² de tierra para salvaguardar su margen del 20%, tomando como base las ventas proyectadas (${gdv:,.0f} MXN) y los costos paramétricos oficiales de construcción (${costo_obra:,.0f} MXN).
-    3. ⚖️ **Riesgos Críticos y Estrategia de Licenciamiento**: Señala el impacto de la norma (CUS/COS), requerimientos de cajones de estacionamiento (con o sin incentivo DOT) y velocidad de absorción del mercado.
+    1. 🎯 **Mayor y Mejor Uso (HBU) y Mix de Producto**: Evalúa el prototipo seleccionado ({prototipo_nombre}) y define la mezcla óptima (% m² locales comerciales en PB vs. % m² departamentos u oficinas arriba). Justifica con base en el precio de venta (${p_venta_usado:,.0f}/m²) y renta (${p_renta_mediana:,.0f}/m²) si conviene venta tradicional o pool de rentas.
+    2. 💰 **Viabilidad Financiera y Precio Máximo de Oferta**: Explica por qué el fondo no debe pagar más de ${residual_m2:,.0f} MXN/m² de tierra para salvaguardar su margen del 20%, tomando como base las ventas proyectadas (${gdv:,.0f} MXN) y los costos paramétricos oficiales (${costo_obra:,.0f} MXN).
+    3. ⚖️ **Riesgos Críticos y Estrategia de Licenciamiento**: Señala el impacto de la norma (CUS/COS), incentivo de transporte DOT y velocidad de absorción del mercado.
     Sé numéricamente implacable, sofisticado y conciso.
     """
 
@@ -300,7 +305,7 @@ def generar_memo_inversionista(data_mza, nearby_df, sup_lote, m2_desplante, m2_c
             model="openai/gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.25,
-            max_tokens=2500
+            max_tokens=1000
         )
         return completion.choices[0].message.content
     except Exception as e:
@@ -309,7 +314,7 @@ def generar_memo_inversionista(data_mza, nearby_df, sup_lote, m2_desplante, m2_c
 # --- 7. INTERFAZ PRINCIPAL DEVELOPER ---
 def main():
     st.markdown("<p style='text-align:center; color:#0A2540; letter-spacing:4px; margin-bottom:0; font-weight:800; font-size:1.35rem;'>HBU-NAVIGATOR | DEVELOPER & PE</p>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align:center; color:#64748B; font-size:0.8rem; margin-top:2px;'>PREFACTIBILIDAD A NIVEL PREDIO CATASTRAL Y MODELO RESIDUAL DE TIERRA</p>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align:center; color:#64748B; font-size:0.8rem; margin-top:2px;'>PREFACTIBILIDAD CATASTRAL, MODELO RESIDUAL Y BENCHMARK $/M²</p>", unsafe_allow_html=True)
     st.markdown("<hr style='margin:10px auto; width:30%; opacity:0.2;'>", unsafe_allow_html=True)
 
     # --- PANEL DE BÚSQUEDA TRIPLE ---
@@ -321,11 +326,7 @@ def main():
     with tab_dir:
         col_txt, col_btn = st.columns([3, 1])
         with col_txt:
-            direccion_input = st.text_input(
-                "Dirección o C.P.:",
-                placeholder="ej. Circuito Madrigal 4295, Zapopan o 45110",
-                label_visibility="collapsed"
-            )
+            direccion_input = st.text_input("Dirección o C.P.:", placeholder="ej. Circuito Madrigal 4295, Zapopan o 45110", label_visibility="collapsed")
         with col_btn:
             buscar_btn = st.button("BUSCAR PREDIO")
 
@@ -359,7 +360,6 @@ def main():
 
     with tab_coord:
         c1, c2, c3 = st.columns([1.5, 1.5, 1])
-        # Coordenadas de prueba en Valle Real / Ventura Vertical
         m_lat = c1.number_input("Latitud", value=20.7145, format="%.6f")
         m_lon = c2.number_input("Longitud", value=-103.4365, format="%.6f")
         if c3.button("FIJAR COORDENADAS"):
@@ -373,7 +373,7 @@ def main():
         lon_now = st.session_state.location['lon']
         acc_now = st.session_state.location.get('acc', 1.0)
 
-        df_mza, tree_mza, df_poi = load_engines()
+        df_mza, tree_mza, df_poi, df_comp, tree_comp = load_engines()
 
         # 1. Búsqueda de Manzana más cercana
         dist_deg, idx_mza = tree_mza.query(np.array([lat_now, lon_now]))
@@ -386,11 +386,8 @@ def main():
 
         sup_oficial_m2 = None
         if es_predio_oficial:
-            # Extraer superficie oficial calculada por el Catastro
-            try:
-                sup_oficial_m2 = float(gdf_predio.iloc[0].get('shape_area', 0.0))
-            except Exception:
-                sup_oficial_m2 = None
+            try: sup_oficial_m2 = float(gdf_predio.iloc[0].get('shape_area', 0.0))
+            except Exception: sup_oficial_m2 = None
 
         # 3. Consulta de Comercios en Anillo de 800m
         radio_800m_deg = 800.0 / 111139.0
@@ -405,6 +402,31 @@ def main():
             nearby_pois = nearby_pois.sort_values(by='dist_m')
             nearby_pois['color'] = [COLOR_MAP.get(str(c), [100, 116, 139, 200]) for c in nearby_pois['cat_hbu']]
             nearby_pois['radius'] = 9
+
+        # 4. CONSULTA DE COMPARABLES DE MERCADO ($/M²) EN 800M
+        nearby_comp = pd.DataFrame()
+        mediana_venta_m2 = 48000.0
+        mediana_renta_m2 = 250.0
+        dias_absorcion_med = 60
+
+        if tree_comp is not None and not df_comp.empty:
+            indices_comp = tree_comp.query_ball_point([lat_now, lon_now], r=radio_800m_deg)
+            if indices_comp:
+                nearby_comp = df_comp.iloc[indices_comp].copy()
+                d_lats_c = nearby_comp['latitud'].values - lat_now
+                d_lons_c = (nearby_comp['longitud'].values - lon_now) * np.cos(np.radians(lat_now))
+                nearby_comp['dist_m'] = np.sqrt(d_lats_c**2 + d_lons_c**2) * 111139
+                nearby_comp = nearby_comp.sort_values(by='dist_m')
+
+                # Calcular medianas de la zona
+                deptos_vta = nearby_comp[(nearby_comp['operacion'] == 'Venta') & (nearby_comp['tipo_propiedad'].isin(['Departamento', 'Casa']))]
+                if not deptos_vta.empty:
+                    mediana_venta_m2 = float(deptos_vta['precio_m2_mxn'].median())
+                    dias_absorcion_med = int(deptos_vta['dias_mercado'].median())
+
+                rentas_loc = nearby_comp[nearby_comp['operacion'] == 'Renta']
+                if not rentas_loc.empty:
+                    mediana_renta_m2 = float(rentas_loc['precio_m2_mxn'].median())
 
         # --- SECCIÓN SUPERIOR: TELEMETRÍA Y DIAL HBU ---
         col_izq, col_cen, col_der = st.columns([1, 1.2, 1])
@@ -423,8 +445,8 @@ def main():
                     <hr style="opacity:0.15; margin:8px 0;">
                     <p style="color:#64748B; font-size:0.75rem; margin:0; font-weight:600;">INCENTIVO DOT</p>
                     <span style="display:inline-block; margin-top:3px; padding:2px 8px; border-radius:4px; font-family:'JetBrains Mono'; font-size:0.85rem; color:{dot_color}; background:{dot_bg}; font-weight:700;">{dot_label}</span>
-                    <p style="color:#64748B; font-size:0.75rem; margin-top:8px; font-weight:600;">NODOS COMERCIALES (800M)</p>
-                    <p style="font-family:'JetBrains Mono'; margin:0; font-size:1.05rem; color:#0A2540; font-weight:700;">{len(nearby_pois)} Activos</p>
+                    <p style="color:#64748B; font-size:0.75rem; margin-top:8px; font-weight:600;">COMPARABLES EN 800M</p>
+                    <p style="font-family:'JetBrains Mono'; margin:0; font-size:1.05rem; color:#0A2540; font-weight:700;">{len(nearby_comp)} Anuncios Activos</p>
                 </div>
             """, unsafe_allow_html=True)
 
@@ -457,9 +479,8 @@ def main():
 
         # --- SECCIÓN: INGRESO DE SUPERFICIE REAL Y MODELO FINANCIERO RESIDUAL ---
         st.markdown('<div class="hud-panel">', unsafe_allow_html=True)
-        st.markdown("<p style='color:#0A2540; font-weight:800; font-size:0.9rem; letter-spacing:1px; margin-bottom:8px;'>💰 MODELO FINANCIERO RESIDUAL DE TIERRA (TABULADOR OFICIAL CMIC)</p>", unsafe_allow_html=True)
+        st.markdown("<p style='color:#0A2540; font-weight:800; font-size:0.9rem; letter-spacing:1px; margin-bottom:8px;'>💰 MODELO FINANCIERO RESIDUAL DE TIERRA (CALIBRADO CON MERCADO VIVO)</p>", unsafe_allow_html=True)
 
-        # Alerta si se cargó la superficie oficial del lote
         if es_predio_oficial and sup_oficial_m2:
             st.markdown(f"""
                 <div class="predio-badge">
@@ -470,8 +491,7 @@ def main():
         prototipo_seleccionado = st.selectbox(
             "🏗️ Selecciona el Prototipo de Construcción a Evaluar (Costos CMIC):",
             list(PARAMETRICOS_CMIC.keys()),
-            index=0,
-            help="Pre-llena automáticamente el costo de obra y precio de venta basados en el Tabulador de Costos Paramétricos de la CMIC."
+            index=0
         )
 
         datos_prototipo = PARAMETRICOS_CMIC[prototipo_seleccionado]
@@ -479,17 +499,15 @@ def main():
         col_f1, col_f2, col_f3 = st.columns(3)
 
         with col_f1:
-            # Si el Catastro devolvió una superficie oficial, la usamos como valor por defecto
             if es_predio_oficial and sup_oficial_m2 and sup_oficial_m2 > 10:
                 sup_default = sup_oficial_m2
             else:
                 sup_default = float(data.get('superficie_terreno_m2', 1000.0))
                 if sup_default > 40000 or sup_default <= 0: sup_default = 1000.0
-
+            
             sup_lote = st.number_input(
                 "Superficie del Terreno (m²):",
-                min_value=50.0, max_value=1000000.0, value=round(sup_default, 2), step=50.0,
-                help="Superficie oficial del terreno (extraída automáticamente si existe polígono catastral)."
+                min_value=50.0, max_value=1000000.0, value=round(sup_default, 2), step=50.0
             )
 
         cus_val = float(data.get('cus', 1.8))
@@ -501,10 +519,12 @@ def main():
         viv_max_real = int(round((sup_lote / 10000.0) * densidad_ha)) if densidad_ha > 0 else 0
 
         with col_f2:
+            # Pre-llenado inteligente con la mediana de comparables de mercado si existe
+            precio_sugerido = mediana_venta_m2 if mediana_venta_m2 > 10000 else datos_prototipo["precio_venta_default"]
             precio_venta_m2 = st.number_input(
                 "Precio Venta Proyectado ($/m² const):",
-                min_value=10000.0, max_value=250000.0, value=datos_prototipo["precio_venta"], step=1000.0,
-                help="Precio promedio de mercado por m² vendible según el prototipo."
+                min_value=10000.0, max_value=250000.0, value=round(precio_sugerido, -2), step=1000.0,
+                help="Pre-llenado automáticamente con la mediana de anuncios de mercado en un radio de 800m."
             )
 
         with col_f3:
@@ -514,7 +534,7 @@ def main():
                 help="Costo paramétrico directo de edificación según tabulador CMIC."
             )
 
-        # CÁLCULOS RESIDUALES FINANCIEROS (85% eficiencia vendible, 20% utilidad desarrollador)
+        # CÁLCULOS RESIDUALES FINANCIEROS
         soft_costs_factor = datos_prototipo["soft_costs_pct"]
         costo_total_obra_directa = m2_construccion_real * costo_obra_m2
         costo_soft_costs = costo_total_obra_directa * soft_costs_factor
@@ -551,6 +571,28 @@ def main():
         st.markdown('</div>', unsafe_allow_html=True)
 
         registrar_telemetria("CALCULO_RESIDUAL_DEVELOPER", data, sup_lote, m2_construccion_real, residual_m2_tierra)
+
+        # --- SECCIÓN: BENCHMARK DE PRECIOS Y COMPARABLES ACTIVOS ---
+        st.markdown('<div class="hud-panel">', unsafe_allow_html=True)
+        st.markdown("<p style='color:#0A2540; font-weight:800; font-size:0.85rem; letter-spacing:1px; margin-bottom:8px;'>📊 BENCHMARK DE PRECIOS Y TESTIGOS DE MERCADO (< 800M)</p>", unsafe_allow_html=True)
+
+        b1, b2, b3, b4 = st.columns(4)
+        b1.metric("Mediana Venta Departamentos", f"${mediana_venta_m2:,.0f} / m²", "Mercado Real")
+        b2.metric("Mediana Renta Mensual", f"${mediana_renta_m2:,.0f} / m²", "Pool / Rentas")
+        b3.metric("Oferta Activa en Radio", f"{len(nearby_comp)} Propiedades", "Muestra 800m")
+        b4.metric("Absorción Estimada", f"{dias_absorcion_med} Días", "Velocidad Venta")
+
+        if not nearby_comp.empty:
+            st.markdown("<p style='color:#64748B; font-size:0.75rem; font-weight:600; margin-top:8px;'>PROPIEDADES TESTIGO MÁS CERCANAS EN EL ENTORNO:</p>", unsafe_allow_html=True)
+            cols_t = ['titulo', 'tipo_propiedad', 'operacion', 'precio_mxn', 'precio_m2_mxn', 'dist_m', 'dias_mercado']
+            df_tabla_comp = nearby_comp[cols_t].head(4).copy()
+            df_tabla_comp.columns = ['Propiedad Testigo', 'Tipo', 'Operación', 'Precio Total', 'Precio $/m²', 'Distancia', 'Días']
+            df_tabla_comp['Precio Total'] = df_tabla_comp['Precio Total'].apply(lambda x: f"${x:,.0f} MXN")
+            df_tabla_comp['Precio $/m²'] = df_tabla_comp['Precio $/m²'].apply(lambda x: f"${x:,.0f}/m²")
+            df_tabla_comp['Distancia'] = df_tabla_comp['Distancia'].apply(lambda x: f"{x:.0f} m")
+            df_tabla_comp['Días'] = df_tabla_comp['Días'].apply(lambda x: f"{x} d")
+            st.dataframe(df_tabla_comp, use_container_width=True, hide_index=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
         # --- ESTIMACIÓN DE POBLACIÓN FLOTANTE ---
         pob_res = int(data.get('POBTOT', 0)) if pd.notna(data.get('POBTOT')) else 0
@@ -596,7 +638,7 @@ def main():
             with st.spinner("Compilando corrida pro-forma y memorándum de inversión con Inteligencia Artificial..."):
                 memo = generar_memo_inversionista(
                     data, nearby_pois, sup_lote, m2_desplante_real, m2_construccion_real,
-                    viv_max_real, pob_diu, arquetipo, gdv_total, costo_total_desarrollo, residual_tierra, residual_m2_tierra, prototipo_seleccionado, es_predio_oficial
+                    viv_max_real, pob_diu, arquetipo, gdv_total, costo_total_desarrollo, residual_tierra, residual_m2_tierra, prototipo_seleccionado, es_predio_oficial, precio_venta_m2, mediana_renta_m2
                 )
                 st.markdown(f"""
                     <div class="memo-panel">
@@ -678,8 +720,8 @@ def main():
         u_lon = float(lon_now)
 
         base_points = pd.DataFrame([
-            {"name": "Ubicación Scout", "lat": u_lat, "lon": u_lon, "color": [37, 99, 235, 255], "radius": 12},
-            {"name": "Centroide Lote", "lat": node_lat, "lon": node_lon, "color": [10, 37, 64, 255], "radius": 16}
+            {"name": "Ubicación Scout", "lat": u_lat, "lon": u_lon, "color": [37, 99, 235, 255], "radius": 13},
+            {"name": "Predio Objetivo HBU", "lat": node_lat, "lon": node_lon, "color": [10, 37, 64, 255], "radius": 18}
         ])
 
         line_data = pd.DataFrame([{"start": [u_lon, u_lat], "end": [node_lon, node_lat]}])
@@ -692,12 +734,11 @@ def main():
         view_state = pdk.ViewState(
             latitude=(u_lat + node_lat) / 2,
             longitude=(u_lon + node_lon) / 2,
-            zoom=15.5,
+            zoom=15.0,
             pitch=25
         )
 
         layers = [
-            # 1. Anillos concéntricos caminables en metros reales
             pdk.Layer(
                 "ScatterplotLayer",
                 rings_data,
@@ -710,7 +751,6 @@ def main():
                 filled=True,
                 pickable=False
             ),
-            # 2. Línea Scout-Predio
             pdk.Layer(
                 "LineLayer",
                 line_data,
@@ -719,7 +759,6 @@ def main():
                 get_color=[10, 37, 64, 220],
                 get_width=3
             ),
-            # 3. Puntos Scout y Centroide
             pdk.Layer(
                 "ScatterplotLayer",
                 base_points,
@@ -730,7 +769,7 @@ def main():
             )
         ]
 
-        # 4. CAPA VECTORIAL DEL POLÍGONO DEL PREDIO OFICIAL (SI SE LOCALIZÓ EN CATASTRO)
+        # Polígono Catastral Oficial si existe
         if es_predio_oficial:
             try:
                 poly_geom = gdf_predio.geometry.iloc[0]
@@ -743,8 +782,8 @@ def main():
                     "PolygonLayer",
                     df_poly_predio,
                     get_polygon="polygon",
-                    get_fill_color=[37, 99, 235, 45],       # Azul translúcido
-                    get_line_color=[10, 37, 64, 255],       # Contorno azul marino sólido
+                    get_fill_color=[37, 99, 235, 45],
+                    get_line_color=[10, 37, 64, 255],
                     get_line_width=3,
                     line_width_min_pixels=2,
                     filled=True,
@@ -755,7 +794,7 @@ def main():
             except Exception:
                 pass
 
-        # 5. Capa de Comercios y Paradas en el Anillo
+        # Capa de Comercios y Paradas
         if not nearby_pois.empty:
             layers.append(pdk.Layer(
                 "ScatterplotLayer",
