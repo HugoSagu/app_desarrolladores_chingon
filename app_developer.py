@@ -305,7 +305,7 @@ def generar_memo_inversionista(data_mza, nearby_df, sup_lote, m2_desplante, m2_c
             model="openai/gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.25,
-            max_tokens=1000
+            max_tokens=3000
         )
         return completion.choices[0].message.content
     except Exception as e:
