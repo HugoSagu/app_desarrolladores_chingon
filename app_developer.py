@@ -217,7 +217,7 @@ PARAMETRICOS_CMIC = {
 @st.cache_resource
 def load_engines():
     base_dir = os.path.dirname(__file__)
-    
+
     path_mza = os.path.join(base_dir, 'data', 'master_jalisco_hbu_scout.parquet')
     if not os.path.exists(path_mza): path_mza = 'master_jalisco_hbu_scout.parquet'
     df_mza = pd.read_parquet(path_mza)
@@ -300,7 +300,7 @@ def generar_memo_inversionista(data_mza, nearby_df, sup_lote, m2_desplante, m2_c
             model="openai/gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.25,
-            max_tokens=1000
+            max_tokens=2500
         )
         return completion.choices[0].message.content
     except Exception as e:
@@ -485,7 +485,7 @@ def main():
             else:
                 sup_default = float(data.get('superficie_terreno_m2', 1000.0))
                 if sup_default > 40000 or sup_default <= 0: sup_default = 1000.0
-            
+
             sup_lote = st.number_input(
                 "Superficie del Terreno (m²):",
                 min_value=50.0, max_value=1000000.0, value=round(sup_default, 2), step=50.0,
